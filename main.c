@@ -109,7 +109,7 @@ session_access(const char *sid, const char *scope, const char *obj, const char *
 
 	ctx = ubus_connect(NULL);
 
-	if (!ctx || ubus_lookup_id(ctx, "session", &id))
+	if (!ctx || !obj || ubus_lookup_id(ctx, "session", &id))
 		goto out;
 
 	blob_buf_init(&req, 0);
@@ -403,7 +403,7 @@ response(bool success, const char *message)
 
 		printf("\t\"failure\": [ %u, \"%s\" ]\n", errno, strerror(errno));
 
-		if (st.filefd > -1)
+		if (st.filefd > -1 && st.filename)
 			unlink(st.filename);
 	}
 
@@ -873,10 +873,15 @@ main_backup(int argc, char **argv)
 static const char *
 lookup_executable(const char *cmd)
 {
-	size_t plen = 0, clen = strlen(cmd) + 1;
+	size_t plen = 0, clen;
 	static char path[PATH_MAX];
 	char *search, *p;
 	struct stat s;
+
+	if (!cmd)
+		return NULL;
+
+	clen = strlen(cmd) + 1;
 
 	if (!stat(cmd, &s) && S_ISREG(s.st_mode))
 		return cmd;
