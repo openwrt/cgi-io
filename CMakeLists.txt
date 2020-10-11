@@ -24,5 +24,9 @@ ADD_LIBRARY(cgi-lib STATIC multipart_parser.c util.c)
 ADD_EXECUTABLE(cgi-io main.c)
 TARGET_LINK_LIBRARIES(cgi-io cgi-lib ${ubox} ${ubus})
 
+IF(UNIT_TESTING)
+  ENABLE_TESTING()
+  ADD_SUBDIRECTORY(tests)
+ENDIF()
 
 INSTALL(TARGETS cgi-io RUNTIME DESTINATION sbin)
