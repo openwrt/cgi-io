@@ -88,7 +88,7 @@ postdecode_fields(char *postbuf, ssize_t len, char **fields, int n_fields)
 	char *p;
 	int i, field, found = 0;
 
-	for (p = postbuf, i = 0; i <= len; i++)
+	for (p = postbuf, i = 0; i < len; i++)
 	{
 		if (postbuf[i] == '=')
 		{
