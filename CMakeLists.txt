@@ -19,7 +19,10 @@ IF(APPLE)
   LINK_DIRECTORIES(/opt/local/lib)
 ENDIF()
 
-ADD_EXECUTABLE(cgi-io main.c multipart_parser.c)
-TARGET_LINK_LIBRARIES(cgi-io ${ubox} ${ubus})
+ADD_LIBRARY(cgi-lib STATIC multipart_parser.c util.c)
+
+ADD_EXECUTABLE(cgi-io main.c)
+TARGET_LINK_LIBRARIES(cgi-io cgi-lib ${ubox} ${ubus})
+
 
 INSTALL(TARGETS cgi-io RUNTIME DESTINATION sbin)
