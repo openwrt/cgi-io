@@ -5,6 +5,8 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <stdio.h>
+
 #include "util.h"
 
 char **
@@ -81,11 +83,54 @@ parse_command(const char *cmdline)
 }
 
 char *
+postdecode_fields(char *postbuf, ssize_t len, char **fields, int n_fields)
+{
+	char *p;
+	int i, field, found = 0;
+
+	for (p = postbuf, i = 0; i <= len; i++)
+	{
+		if (postbuf[i] == '=')
+		{
+			postbuf[i] = 0;
+
+			for (field = 0; field < (n_fields * 2); field += 2)
+			{
+				if (!strcmp(p, fields[field]))
+				{
+					fields[field + 1] = postbuf + i + 1;
+					found++;
+				}
+			}
+		}
+		else if (postbuf[i] == '&' || postbuf[i] == '\0')
+		{
+			postbuf[i] = 0;
+
+			if (found >= n_fields)
+				break;
+
+			p = postbuf + i + 1;
+		}
+	}
+
+	for (field = 0; field < (n_fields * 2); field += 2)
+	{
+		if (!urldecode(fields[field + 1]))
+		{
+			free(postbuf);
+			return NULL;
+		}
+	}
+
+	return postbuf;
+}
+
+char *
 postdecode(char **fields, int n_fields)
 {
 	const char *var;
 	char *p, *postbuf;
-	int i, field, found = 0;
 	ssize_t len = 0, rlen = 0, content_length = 0;
 
 	var = getenv("CONTENT_TYPE");
@@ -124,42 +169,7 @@ postdecode(char **fields, int n_fields)
 		return NULL;
 	}
 
-	for (p = postbuf, i = 0; i <= len; i++)
-	{
-		if (postbuf[i] == '=')
-		{
-			postbuf[i] = 0;
-
-			for (field = 0; field < (n_fields * 2); field += 2)
-			{
-				if (!strcmp(p, fields[field]))
-				{
-					fields[field + 1] = postbuf + i + 1;
-					found++;
-				}
-			}
-		}
-		else if (postbuf[i] == '&' || postbuf[i] == '\0')
-		{
-			postbuf[i] = 0;
-
-			if (found >= n_fields)
-				break;
-
-			p = postbuf + i + 1;
-		}
-	}
-
-	for (field = 0; field < (n_fields * 2); field += 2)
-	{
-		if (!urldecode(fields[field + 1]))
-		{
-			free(postbuf);
-			return NULL;
-		}
-	}
-
-	return postbuf;
+	return postdecode_fields(postbuf, len, fields, n_fields);
 }
 
 char *
