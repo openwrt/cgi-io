@@ -1,0 +1,1 @@
+sessionid=0&command=basename /king/banik/1922&filename=output.txt&mimetype=0&
