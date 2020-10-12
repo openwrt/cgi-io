@@ -72,6 +72,10 @@ struct state
 	int tempfd;
 };
 
+static struct state st;
+
+#ifndef UNIT_TESTING
+
 enum {
 	SES_ACCESS,
 	__SES_MAX,
@@ -80,9 +84,6 @@ enum {
 static const struct blobmsg_policy ses_policy[__SES_MAX] = {
 	[SES_ACCESS] = { .name = "access", .type = BLOBMSG_TYPE_BOOL },
 };
-
-
-static struct state st;
 
 static void
 session_access_cb(struct ubus_request *req, int type, struct blob_attr *msg)
@@ -98,10 +99,14 @@ session_access_cb(struct ubus_request *req, int type, struct blob_attr *msg)
 	if (tb[SES_ACCESS])
 		*allow = blobmsg_get_bool(tb[SES_ACCESS]);
 }
+#endif
 
 static bool
 session_access(const char *sid, const char *scope, const char *obj, const char *func)
 {
+#ifdef UNIT_TESTING
+	return true;
+#else
 	uint32_t id;
 	bool allow = false;
 	struct ubus_context *ctx;
@@ -125,6 +130,7 @@ out:
 		ubus_free(ctx);
 
 	return allow;
+#endif
 }
 
 static char *
