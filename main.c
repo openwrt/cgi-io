@@ -672,7 +672,7 @@ main_backup(int argc, char **argv)
 
 		do {
 			len = splice(fds[0], NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
-		} while (len > 0);
+		} while (len > 0 || (len == -1 && errno == EINTR));
 
 		waitpid(pid, &status, 0);
 
@@ -836,7 +836,7 @@ main_exec(int argc, char **argv)
 
 		do {
 			len = splice(fds[0], NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
-		} while (len > 0);
+		} while (len > 0 || (len == -1 && errno == EINTR));
 
 		waitpid(pid, &status, 0);
 
