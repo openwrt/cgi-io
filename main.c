@@ -314,21 +314,21 @@ header_value(multipart_parser *p, const char *data, size_t len)
 	if (len < 10 || strncasecmp(data, "form-data", 9))
 		return 0;
 
-	for (data += 9, len -= 9; *data == ' ' || *data == ';'; data++, len--);
+	for (data += 9, len -= 9; len > 0 && (*data == ' ' || *data == ';'); data++, len--);
 
 	if (len < 8 || strncasecmp(data, "name=\"", 6))
 		return 0;
 
-	for (data += 6, len -= 6, i = 0; i <= len; i++)
+	for (data += 6, len -= 6, i = 1; i < len; i++)
 	{
-		if (*(data + i) != '"')
-			continue;
+		if (data[i] == '"')
+		{
+			for (j = 1; j < sizeof(parts) / sizeof(parts[0]); j++)
+				if (!strncmp(data, parts[j], i - 1))
+					st.parttype = j;
 
-		for (j = 1; j < sizeof(parts) / sizeof(parts[0]); j++)
-			if (!strncmp(data, parts[j], i))
-				st.parttype = j;
-
-		break;
+			break;
+		}
 	}
 
 	return 0;
