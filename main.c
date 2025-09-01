@@ -730,15 +730,15 @@ lookup_executable(const char *cmd)
 static int
 main_exec(int argc, char **argv)
 {
-	char *fields[] = { "sessionid", NULL, "command", NULL, "filename", NULL, "mimetype", NULL };
+	char *fields[] = { "sessionid", NULL, "command", NULL, "filename", NULL, "mimetype", NULL, "stderr", NULL };
 	int i, devnull, status, fds[2];
-	bool allowed = false;
+	bool allowed = false, redir_stderr = false;
 	ssize_t len = 0;
 	const char *exe;
 	char *p, **args;
 	pid_t pid;
 
-	autochar *post = postdecode(fields, 4);
+	autochar *post = postdecode(fields, 5);
 	(void) post;
 
 	if (!fields[1] || !session_access(fields[1], "cgi-io", "exec", "read"))
@@ -751,6 +751,10 @@ main_exec(int argc, char **argv)
 	for (p = fields[7]; p && *p; p++)
 		if (!isalnum(*p) && !strchr(" .;=/-", *p))
 			return failure(400, 0, "Invalid characters in mimetype");
+
+	p = fields[9];
+	if (p && p[0] == '1' && p[1] == '\0')
+		redir_stderr = true;
 
 	args = fields[3] ? parse_command(fields[3]) : NULL;
 
@@ -796,7 +800,8 @@ main_exec(int argc, char **argv)
 
 		if (devnull > -1) {
 			dup2(devnull, 0);
-			dup2(devnull, 2);
+			if (!redir_stderr)
+				dup2(devnull, 2);
 			close(devnull);
 		}
 		else {
@@ -805,6 +810,8 @@ main_exec(int argc, char **argv)
 		}
 
 		dup2(fds[1], 1);
+		if (redir_stderr)
+			dup2(fds[1], 2);
 		close(fds[0]);
 		close(fds[1]);
 
