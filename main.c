@@ -621,18 +621,71 @@ main_download(int argc, char **argv)
 	return 0;
 }
 
+enum {
+	BACKUP_CODE,
+	BACKUP_STDERR,
+	__BACKUP_MAX,
+};
+
+static const struct blobmsg_policy backup_policy[__BACKUP_MAX] = {
+	[BACKUP_CODE]   = { .name = "code", .type = BLOBMSG_TYPE_INT32 },
+	[BACKUP_STDERR] = { .name = "stderr", .type = BLOBMSG_TYPE_STRING },
+};
+
+struct backup_data {
+	int code;
+	int fd;
+	char errmsg[256];
+};
+
+static void
+backup_reply_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	struct backup_data *data = req->priv;
+	struct blob_attr *tb[__BACKUP_MAX];
+	char *p;
+
+	if (!msg)
+		return;
+
+	blobmsg_parse(backup_policy, __BACKUP_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (tb[BACKUP_CODE])
+		data->code = blobmsg_get_u32(tb[BACKUP_CODE]);
+
+	if (tb[BACKUP_STDERR]) {
+		snprintf(data->errmsg, sizeof(data->errmsg), "%s",
+			 blobmsg_get_string(tb[BACKUP_STDERR]));
+
+		for (p = data->errmsg; *p; p++)
+			if (*p == '\n' || *p == '\r')
+				*p = ' ';
+	}
+}
+
+static void
+backup_fd_cb(struct ubus_request *req, int fd)
+{
+	struct backup_data *data = req->priv;
+
+	data->fd = fd;
+}
+
 static int
 main_backup(int argc, char **argv)
 {
-	pid_t pid;
+	uint32_t id;
 	time_t now;
-	int r;
 	int len;
-	int status;
-	int fds[2];
+	int r;
+	void *array;
 	char datestr[16] = { 0 };
 	char hostname[64] = { 0 };
 	char *fields[] = { "sessionid", NULL };
+	struct ubus_context *ctx;
+	struct ubus_request req;
+	static struct blob_buf buf;
+	struct backup_data data = { .fd = -1 };
 
 	autochar *post = postdecode(fields, 1);
 
@@ -642,57 +695,62 @@ main_backup(int argc, char **argv)
 	if (!fields[1] || !session_access(fields[1], "cgi-io", "backup", "read"))
 		return failure(403, 0, "Backup permission denied");
 
-	if (pipe(fds))
-		return failure(500, errno, "Failed to spawn pipe");
+	ctx = ubus_connect(NULL);
 
-	switch ((pid = fork()))
-	{
-	case -1:
-		return failure(500, errno, "Failed to fork process");
+	if (!ctx || ubus_lookup_id(ctx, "file", &id))
+		return failure(500, 0, "Failed to connect to ubus daemon");
 
-	case 0:
-		dup2(fds[1], 1);
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "ubus_rpc_session", fields[1]);
+	blobmsg_add_string(&buf, "command", "/sbin/sysupgrade");
 
-		close(0);
-		close(2);
-		close(fds[0]);
-		close(fds[1]);
+	array = blobmsg_open_array(&buf, "params");
+	blobmsg_add_string(&buf, NULL, "--create-backup");
+	blobmsg_add_string(&buf, NULL, "-");
+	blobmsg_close_array(&buf, array);
 
-		r = chdir("/");
-		if (r < 0)
-			return failure(500, errno, "Failed chdir('/')");
+	blobmsg_add_u8(&buf, "stream", true);
 
-		execl("/sbin/sysupgrade", "/sbin/sysupgrade",
-		      "--create-backup", "-", NULL);
+	r = ubus_invoke_async(ctx, id, "exec", buf.head, &req);
 
-		return -1;
-
-	default:
-		close(fds[1]);
-
-		now = time(NULL);
-		strftime(datestr, sizeof(datestr) - 1, "%Y-%m-%d", localtime(&now));
-
-		if (gethostname(hostname, sizeof(hostname) - 1))
-			sprintf(hostname, "OpenWrt");
-
-		printf("Status: 200 OK\r\n");
-		printf("Content-Type: application/x-targz\r\n");
-		printf("Content-Disposition: attachment; "
-		       "filename=\"backup-%s-%s.tar.gz\"\r\n\r\n", hostname, datestr);
-
-		fflush(stdout);
-
-		do {
-			len = splice(fds[0], NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
-		} while (len > 0 || (len == -1 && errno == EINTR));
-
-		waitpid(pid, &status, 0);
-
-		close(fds[0]);
-
-		return 0;
+	if (r == 0) {
+		req.priv = &data;
+		req.data_cb = backup_reply_cb;
+		req.fd_cb = backup_fd_cb;
+		r = ubus_complete_request(ctx, &req, 130000);
 	}
+
+	ubus_free(ctx);
+
+	if (r)
+		return failure(500, 0, "Failed to create backup");
+
+	if (data.fd < 0)
+		return failure(500, 0, "Backup streaming unsupported by rpcd");
+
+	if (data.code)
+		return failure(500, 0, data.errmsg[0] ? data.errmsg : "Backup failed");
+
+	now = time(NULL);
+	strftime(datestr, sizeof(datestr) - 1, "%Y-%m-%d", localtime(&now));
+
+	if (gethostname(hostname, sizeof(hostname) - 1))
+		sprintf(hostname, "OpenWrt");
+
+	printf("Status: 200 OK\r\n");
+	printf("Content-Type: application/x-targz\r\n");
+	printf("Content-Disposition: attachment; "
+	       "filename=\"backup-%s-%s.tar.gz\"\r\n\r\n", hostname, datestr);
+
+	fflush(stdout);
+
+	do {
+		len = splice(data.fd, NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
+	} while (len > 0 || (len == -1 && errno == EINTR));
+
+	close(data.fd);
+
+	return 0;
 }
 
 
