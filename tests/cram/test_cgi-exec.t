@@ -17,14 +17,14 @@ check that cgi-exec is producing expected results:
   Invalid command parameter
   
   [-] testing: cgi-exec-02.txt
-  Status: 200 OK\r (esc)
-  Content-Type: application/octet-stream\r (esc)
+  Status: 404 Executable not found\r (esc)
+  Content-Type: text/plain\r (esc)
   \r (esc)
-  foo
+  Executable not found
   
   [-] testing: cgi-exec-03.txt
-  Status: 200 OK\r (esc)
-  Content-Type: 0\r (esc)
-  Content-Disposition: attachment; filename="output.txt"\r (esc)
+  Status: 400 Invalid characters in filename\r (esc)
+  Content-Type: text/plain\r (esc)
   \r (esc)
-  1922
+  Invalid characters in filename
+  [255]
