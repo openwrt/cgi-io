@@ -621,18 +621,76 @@ main_download(int argc, char **argv)
 	return 0;
 }
 
+enum {
+	CMD_CODE,
+	CMD_STDERR,
+	__CMD_MAX,
+};
+
+static const struct blobmsg_policy cmd_policy[__CMD_MAX] = {
+	[CMD_CODE]   = { .name = "code", .type = BLOBMSG_TYPE_INT32 },
+	[CMD_STDERR] = { .name = "stderr", .type = BLOBMSG_TYPE_STRING },
+};
+
+struct cmd_data {
+	int code;
+	int fd;
+	bool redir_stderr;
+	char *stderr_buf;
+	char errmsg[256];
+};
+
+static void
+cmd_reply_cb(struct ubus_request *req, int type, struct blob_attr *msg)
+{
+	struct cmd_data *data = req->priv;
+	struct blob_attr *tb[__CMD_MAX];
+	char *p;
+
+	if (!msg)
+		return;
+
+	blobmsg_parse(cmd_policy, __CMD_MAX, tb, blob_data(msg), blob_len(msg));
+
+	if (tb[CMD_CODE])
+		data->code = blobmsg_get_u32(tb[CMD_CODE]);
+
+	if (tb[CMD_STDERR]) {
+		if (data->redir_stderr)
+			data->stderr_buf = strdup(blobmsg_get_string(tb[CMD_STDERR]));
+
+		snprintf(data->errmsg, sizeof(data->errmsg), "%s",
+			 blobmsg_get_string(tb[CMD_STDERR]));
+
+		for (p = data->errmsg; *p; p++)
+			if (*p == '\n' || *p == '\r')
+				*p = ' ';
+	}
+}
+
+static void
+cmd_fd_cb(struct ubus_request *req, int fd)
+{
+	struct cmd_data *data = req->priv;
+
+	data->fd = fd;
+}
+
 static int
 main_backup(int argc, char **argv)
 {
-	pid_t pid;
+	uint32_t id;
 	time_t now;
-	int r;
 	int len;
-	int status;
-	int fds[2];
+	int r;
+	void *array;
 	char datestr[16] = { 0 };
 	char hostname[64] = { 0 };
 	char *fields[] = { "sessionid", NULL };
+	struct ubus_context *ctx;
+	struct ubus_request req;
+	static struct blob_buf buf;
+	struct cmd_data data = { .fd = -1 };
 
 	autochar *post = postdecode(fields, 1);
 
@@ -642,57 +700,62 @@ main_backup(int argc, char **argv)
 	if (!fields[1] || !session_access(fields[1], "cgi-io", "backup", "read"))
 		return failure(403, 0, "Backup permission denied");
 
-	if (pipe(fds))
-		return failure(500, errno, "Failed to spawn pipe");
+	ctx = ubus_connect(NULL);
 
-	switch ((pid = fork()))
-	{
-	case -1:
-		return failure(500, errno, "Failed to fork process");
+	if (!ctx || ubus_lookup_id(ctx, "file", &id))
+		return failure(500, 0, "Failed to connect to ubus daemon");
 
-	case 0:
-		dup2(fds[1], 1);
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "ubus_rpc_session", fields[1]);
+	blobmsg_add_string(&buf, "command", "/sbin/sysupgrade");
 
-		close(0);
-		close(2);
-		close(fds[0]);
-		close(fds[1]);
+	array = blobmsg_open_array(&buf, "params");
+	blobmsg_add_string(&buf, NULL, "--create-backup");
+	blobmsg_add_string(&buf, NULL, "-");
+	blobmsg_close_array(&buf, array);
 
-		r = chdir("/");
-		if (r < 0)
-			return failure(500, errno, "Failed chdir('/')");
+	blobmsg_add_u8(&buf, "stream", true);
 
-		execl("/sbin/sysupgrade", "/sbin/sysupgrade",
-		      "--create-backup", "-", NULL);
+	r = ubus_invoke_async(ctx, id, "exec", buf.head, &req);
 
-		return -1;
-
-	default:
-		close(fds[1]);
-
-		now = time(NULL);
-		strftime(datestr, sizeof(datestr) - 1, "%Y-%m-%d", localtime(&now));
-
-		if (gethostname(hostname, sizeof(hostname) - 1))
-			sprintf(hostname, "OpenWrt");
-
-		printf("Status: 200 OK\r\n");
-		printf("Content-Type: application/x-targz\r\n");
-		printf("Content-Disposition: attachment; "
-		       "filename=\"backup-%s-%s.tar.gz\"\r\n\r\n", hostname, datestr);
-
-		fflush(stdout);
-
-		do {
-			len = splice(fds[0], NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
-		} while (len > 0 || (len == -1 && errno == EINTR));
-
-		waitpid(pid, &status, 0);
-
-		close(fds[0]);
-
-		return 0;
+	if (r == 0) {
+		req.priv = &data;
+		req.data_cb = cmd_reply_cb;
+		req.fd_cb = cmd_fd_cb;
+		r = ubus_complete_request(ctx, &req, 130000);
 	}
+
+	ubus_free(ctx);
+
+	if (r)
+		return failure(500, 0, "Failed to create backup");
+
+	if (data.fd < 0)
+		return failure(500, 0, "Backup streaming unsupported by rpcd");
+
+	if (data.code)
+		return failure(500, 0, data.errmsg[0] ? data.errmsg : "Backup failed");
+
+	now = time(NULL);
+	strftime(datestr, sizeof(datestr) - 1, "%Y-%m-%d", localtime(&now));
+
+	if (gethostname(hostname, sizeof(hostname) - 1))
+		sprintf(hostname, "OpenWrt");
+
+	printf("Status: 200 OK\r\n");
+	printf("Content-Type: application/x-targz\r\n");
+	printf("Content-Disposition: attachment; "
+	       "filename=\"backup-%s-%s.tar.gz\"\r\n\r\n", hostname, datestr);
+
+	fflush(stdout);
+
+	do {
+		len = splice(data.fd, NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
+	} while (len > 0 || (len == -1 && errno == EINTR));
+
+	close(data.fd);
+
+	return 0;
 }
 
 
@@ -743,15 +806,20 @@ lookup_executable(const char *cmd)
 static int
 main_exec(int argc, char **argv)
 {
+	uint32_t id;
+	int len;
+	int r;
+	int i;
+	void *array;
 	char *fields[] = { "sessionid", NULL, "command", NULL, "filename", NULL, "mimetype", NULL, "stderr", NULL };
-	int i, devnull, status, fds[2];
-	bool allowed = false, redir_stderr = false;
-	ssize_t len = 0;
 	size_t exelen;
 	const char *exe;
 	char *p, **args;
+	struct ubus_context *ctx;
+	struct ubus_request req;
+	static struct blob_buf buf;
+	struct cmd_data data = { .fd = -1 };
 	autochar *canon = NULL;
-	pid_t pid;
 
 	autochar *post = postdecode(fields, 5);
 
@@ -771,7 +839,7 @@ main_exec(int argc, char **argv)
 
 	p = fields[9];
 	if (p && p[0] == '1' && p[1] == '\0')
-		redir_stderr = true;
+		data.redir_stderr = true;
 
 	args = fields[3] ? parse_command(fields[3]) : NULL;
 
@@ -779,12 +847,9 @@ main_exec(int argc, char **argv)
 		return failure(400, 0, "Invalid command parameter");
 
 	/*
-	 * Canonicalize the executable path before checking it against the
-	 * session ACL and executing it. As the rpcd ACL matcher uses fnmatch()
-	 * without FNM_PATHNAME, a "../" sequence in the leading token would
-	 * otherwise let an allowed glob prefix match while execv() resolves to a
-	 * binary outside of that prefix. The leading token is everything up to
-	 * the first argument separator.
+	 * Canonicalize the executable path before resolving it. rpcd matches
+	 * the ACL against the canonical path, so this keeps the exec target and
+	 * the ACL match in agreement.
 	 */
 	exelen = args[1] ? (size_t)(args[1] - args[0] - 1) : strlen(args[0]);
 	canon = canonicalize_path(args[0], exelen);
@@ -792,22 +857,6 @@ main_exec(int argc, char **argv)
 	if (!canon) {
 		free(args);
 		return failure(400, 0, "Invalid command parameter");
-	}
-
-	/* First check if we find an ACL match for the whole cmdline ... */
-	{
-		char *tail = args[0] + exelen;
-		autochar *cmdline = malloc(strlen(canon) + strlen(tail) + 1);
-
-		if (!cmdline) {
-			free(args);
-			return failure(500, errno, "Out of memory");
-		}
-
-		strcpy(cmdline, canon);
-		strcat(cmdline, tail);
-
-		allowed = session_access(fields[1], "file", cmdline, "exec");
 	}
 
 	/* Now split the command vector... */
@@ -822,82 +871,75 @@ main_exec(int argc, char **argv)
 		return failure(404, 0, "Executable not found");
 	}
 
-	/* If there was no ACL match, check for a match on the executable */
-	if (!allowed && !session_access(fields[1], "file", exe, "exec")) {
+	ctx = ubus_connect(NULL);
+
+	if (!ctx || ubus_lookup_id(ctx, "file", &id)) {
 		free(args);
-		return failure(403, 0, "Access to command denied by ACL");
+		return failure(500, 0, "Failed to connect to ubus daemon");
 	}
 
-	if (pipe(fds)) {
-		free(args);
-		return failure(500, errno, "Failed to spawn pipe");
+	blob_buf_init(&buf, 0);
+	blobmsg_add_string(&buf, "ubus_rpc_session", fields[1]);
+	blobmsg_add_string(&buf, "command", exe);
+
+	array = blobmsg_open_array(&buf, "params");
+	for (i = 1; args[i]; i++)
+		blobmsg_add_string(&buf, NULL, args[i]);
+	blobmsg_close_array(&buf, array);
+
+	blobmsg_add_u8(&buf, "stream", true);
+
+	r = ubus_invoke_async(ctx, id, "exec", buf.head, &req);
+
+	if (r == 0) {
+		req.priv = &data;
+		req.data_cb = cmd_reply_cb;
+		req.fd_cb = cmd_fd_cb;
+		r = ubus_complete_request(ctx, &req, 130000);
 	}
 
-	switch ((pid = fork()))
-	{
-	case -1:
-		free(args);
-		close(fds[0]);
-		close(fds[1]);
-		return failure(500, errno, "Failed to fork process");
+	ubus_free(ctx);
+	free(args);
 
-	case 0:
-		devnull = open("/dev/null", O_RDWR);
-
-		if (devnull > -1) {
-			dup2(devnull, 0);
-			if (!redir_stderr)
-				dup2(devnull, 2);
-			close(devnull);
-		}
-		else {
-			close(0);
-			close(2);
-		}
-
-		dup2(fds[1], 1);
-		if (redir_stderr)
-			dup2(fds[1], 2);
-		close(fds[0]);
-		close(fds[1]);
-
-		if (chdir("/") < 0) {
-			free(args);
-			return failure(500, errno, "Failed chdir('/')");
-		}
-
-		if (execv(exe, args) < 0) {
-			free(args);
-			return failure(500, errno, "Failed execv(...)");
-		}
-
-		return -1;
-
-	default:
-		close(fds[1]);
-
-		printf("Status: 200 OK\r\n");
-		printf("Content-Type: %s\r\n",
-		       fields[7] ? fields[7] : "application/octet-stream");
-
-		if (fields[5])
-			printf("Content-Disposition: attachment; filename=\"%s\"\r\n",
-			       fields[5]);
-
-		printf("\r\n");
-		fflush(stdout);
-
-		do {
-			len = splice(fds[0], NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
-		} while (len > 0 || (len == -1 && errno == EINTR));
-
-		waitpid(pid, &status, 0);
-
-		close(fds[0]);
-		free(args);
-
-		return 0;
+	if (r) {
+		free(data.stderr_buf);
+		return failure(500, 0, "Failed to execute command");
 	}
+
+	if (data.fd < 0) {
+		free(data.stderr_buf);
+		return failure(500, 0, "Exec streaming unsupported by rpcd");
+	}
+
+	if (data.code) {
+		free(data.stderr_buf);
+		return failure(500, 0, data.errmsg[0] ? data.errmsg : "Command failed");
+	}
+
+	printf("Status: 200 OK\r\n");
+	printf("Content-Type: %s\r\n",
+	       fields[7] ? fields[7] : "application/octet-stream");
+
+	if (fields[5])
+		printf("Content-Disposition: attachment; filename=\"%s\"\r\n",
+		       fields[5]);
+
+	printf("\r\n");
+
+	if (data.stderr_buf) {
+		fwrite(data.stderr_buf, strlen(data.stderr_buf), 1, stdout);
+		free(data.stderr_buf);
+	}
+
+	fflush(stdout);
+
+	do {
+		len = splice(data.fd, NULL, 1, NULL, READ_BLOCK, SPLICE_F_MORE);
+	} while (len > 0 || (len == -1 && errno == EINTR));
+
+	close(data.fd);
+
+	return 0;
 }
 
 int main(int argc, char **argv)
